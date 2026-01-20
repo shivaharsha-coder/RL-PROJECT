@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Smart Warehouse Routing Robot — Enhanced DQN Learning</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f9fbfd; color: #222; text-align: center; margin: 0; }
+    header { background: #007bff; color: white; padding: 15px; font-size: 20px; font-weight: bold; }
+    #container { display: flex; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+    canvas { border: 2px solid #007bff; background: white; cursor: pointer; }
+    #controls { margin: 15px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+    button { background: #007bff; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-size: 15px; cursor: pointer; transition: background 0.3s; }
+    button:hover { background: #0056b3; }
+    footer { background: #f1f1f1; padding: 10px; font-size: 13px; color: #555; margin-top: 30px; }
+  </style>
+</head>
+<body>
+  <header>🤖 Smart Warehouse Routing Robot — Enhanced DQN Learning (Fixed)</header>
+  <div id="container">
+    <canvas id="grid" width="480" height="480"></canvas>
+    <div id="controls">
+      <button id="setStart">Set Start</button>
+      <button id="setGoal">Set Goal</button>
+      <button id="toggleRack">Toggle Rack</button>
+      <button id="addRandomObstacles">Add Random Obstacles</button>
+      <button id="runAStar">Run A*</button>
+      <button id="runDQN">Run DQN Learning</button>
+      <button id="clear">Clear Grid</button>
+      <div id="info">Click buttons then click the grid to place items. DQN now uses per-state-action Q-values and proper updates to avoid getting stuck.</div>
+    </div>
+  </div>
+
+  <footer>Created for Smart Warehouse Routing Project — DQN Fixes Applied</footer>
+
+  <script>
+    // Improved JS DQN (tabular) for grid navigation
+    const canvas = document.getElementById('grid');
+    const ctx = canvas.getContext('2d');
+    const gridSize = 10;
+    const cell = canvas.width / gridSize;
+    let start = null, goal = null, mode = '';
+    const racks = new Set();
+    let path = [];
+
+    const ACTIONS = [ {dx:1,dy:0}, {dx:-1,dy:0}, {dx:0,dy:1}, {dx:0,dy:-1} ]; // right,left,down,up
+
+    function key(x,y){return `${x},${y}`}
+    function drawGrid(){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      for(let y=0;y<gridSize;y++){
+        for(let x=0;x<gridSize;x++){
+          ctx.strokeStyle='#eee'; ctx.strokeRect(x*cell,y*cell,cell,cell);
+          if(racks.has(key(x,y))){ ctx.fillStyle='#333'; ctx.fillRect(x*cell,y*cell,cell,cell); }
+        }
+      }
+      if(path && path.length){ ctx.beginPath(); ctx.moveTo(path[0].x*cell+cell/2, path[0].y*cell+cell/2); path.forEach(p=>ctx.lineTo(p.x*cell+cell/2,p.y*cell+cell/2)); ctx.strokeStyle='#007bff'; ctx.lineWidth=4; ctx.stroke(); }
+      if(start){ ctx.fillStyle='green'; ctx.fillRect(start.x*cell+4,start.y*cell+4,cell-8,cell-8); }
+      if(goal){ ctx.fillStyle='red'; ctx.fillRect(goal.x*cell+4,goal.y*cell+4,cell-8,cell-8); }
+    }
+
+    function inBounds(x,y){return x>=0 && y>=0 && x<gridSize && y<gridSize}
+
+    function stepFrom(state, action){
+      const nx = state.x + ACTIONS[action].dx;
+      const ny = state.y + ACTIONS[action].dy;
+      if(!inBounds(nx,ny)) return {x:state.x,y:state.y, invalid:true};
+      if(racks.has(key(nx,ny))) return {x:state.x,y:state.y, invalid:true};
+      return {x:nx,y:ny, invalid:false};
+    }
+
+    // A* (unchanged)
+    function heuristic(a,b){ return Math.abs(a.x-b.x)+Math.abs(a.y-b.y); }
+    function neighbors(node){
+      const res=[]; for(const a of ACTIONS){ const nx=node.x+a.dx, ny=node.y+a.dy; if(inBounds(nx,ny) && !racks.has(key(nx,ny))){ res.push({x:nx,y:ny}); } } return res;
+    }
+    function astar(startNode, goalNode){
+      const open=[startNode]; const came={}; const g={ [key(startNode.x,startNode.y)]:0 }; const f={ [key(startNode.x,startNode.y)]:heuristic(startNode,goalNode) };
+      while(open.length){ open.sort((a,b)=>f[key(a.x,a.y)]-f[key(b.x,b.y)]); const current = open.shift(); if(current.x===goalNode.x && current.y===goalNode.y){ const path=[]; let cur = key(goalNode.x,goalNode.y); while(cur in came){ const [x,y]=cur.split(',').map(Number); path.unshift({x,y}); cur = came[cur]; } return path; } for(const nb of neighbors(current)){ const nk=key(nb.x,nb.y); const tg = g[key(current.x,current.y)] + 1; if(!(nk in g) || tg < g[nk]){ came[nk] = key(current.x,current.y); g[nk] = tg; f[nk] = tg + heuristic(nb, goalNode); if(!open.some(o=>o.x===nb.x && o.y===nb.y)) open.push(nb); } } } return []; }
+
+    // Improved tabular DQN-like Q-learning
+    async function runDQN(){
+      if(!start || !goal){ alert('Set start and goal first'); return; }
+      // Q[stateKey] = [q0,q1,q2,q3]
+      const Q = {};
+      function qInit(s){ if(!(s in Q)) Q[s] = [0,0,0,0]; }
+      const alpha = 0.4, gamma = 0.95; let epsilon = 1.0; const minEps = 0.05; const epsDecay = 0.995; const episodes = 2000; const maxSteps = 200;
+
+      for(let ep=0; ep<episodes; ep++){
+        let state = {x:start.x, y:start.y};
+        for(let step=0; step<maxSteps; step++){
+          const sKey = key(state.x,state.y); qInit(sKey);
+          // choose action
+          let action;
+          if(Math.random() < epsilon){ action = Math.floor(Math.random()*4); }
+          else { action = Q[sKey].map((v,i)=>[v,i]).reduce((a,b)=>a[0]>b[0]?a:b)[1]; }
+          // perform step
+          const res = stepFrom(state, action);
+          const ns = {x:res.x, y:res.y}; const nKey = key(ns.x, ns.y); qInit(nKey);
+          let reward = -1; // step penalty
+          if(res.invalid){ reward = -5; } // invalid move penalty
+          if(ns.x === goal.x && ns.y === goal.y){ reward = 100; }
+          // update Q
+          const maxNext = Math.max(...Q[nKey]);
+          Q[sKey][action] = Q[sKey][action] + alpha * (reward + gamma * maxNext - Q[sKey][action]);
+          state = ns;
+          if(ns.x === goal.x && ns.y === goal.y) break;
+        }
+        epsilon = Math.max(minEps, epsilon * epsDecay);
+        // optional: yield to UI occasionally
+        if(ep % 200 === 0){ await new Promise(r=>setTimeout(r,10)); }
+      }
+
+      // Build greedy path from learned Q
+      path = [];
+      let cur = {x:start.x, y:start.y}; path.push(cur);
+      for(let i=0;i<gridSize*gridSize;i++){
+        const sKey = key(cur.x,cur.y); if(!(sKey in Q)) break;
+        const bestAction = Q[sKey].map((v,i)=>[v,i]).reduce((a,b)=>a[0]>b[0]?a:b)[1];
+        const next = stepFrom(cur, bestAction);
+        // if action invalid or loops, stop
+        if(next.invalid) break;
+        cur = {x:next.x, y:next.y}; path.push(cur);
+        if(cur.x===goal.x && cur.y===goal.y) break;
+      }
+
+      drawGrid();
+      // If path didn't reach goal, show A* fallback
+      if(!(path.length && path[path.length-1].x===goal.x && path[path.length-1].y===goal.y)){
+        const ast = astar(start, goal);
+        if(ast && ast.length){ path = ast; drawGrid(); alert('DQN failed to reach goal reliably — showing A* fallback path. Consider increasing episodes or reducing obstacles.'); }
+        else { alert('No path found by DQN or A* (blocked).'); }
+      } else {
+        alert('DQN learned a path to goal!');
+      }
+    }
+
+    function addRandomObstacles(count=15){ racks.clear(); for(let i=0;i<count;i++){ const x=Math.floor(Math.random()*gridSize); const y=Math.floor(Math.random()*gridSize); const k=key(x,y); if(start && x===start.x && y===start.y) continue; if(goal && x===goal.x && y===goal.y) continue; racks.add(k);} drawGrid(); }
+
+    canvas.addEventListener('click', e=>{ const rect=canvas.getBoundingClientRect(); const x=Math.floor((e.clientX-rect.left)/cell); const y=Math.floor((e.clientY-rect.top)/cell); if(mode==='start') start={x,y}; else if(mode==='goal') goal={x,y}; else if(mode==='rack'){ const k=key(x,y); if(racks.has(k)) racks.delete(k); else racks.add(k);} drawGrid(); });
+    document.getElementById('setStart').onclick=()=>mode='start'; document.getElementById('setGoal').onclick=()=>mode='goal'; document.getElementById('toggleRack').onclick=()=>mode='rack'; document.getElementById('addRandomObstacles').onclick=()=>addRandomObstacles(); document.getElementById('runAStar').onclick=()=>{ if(!start||!goal) return alert('Set start & goal!'); path=astar(start,goal); drawGrid(); }; document.getElementById('runDQN').onclick=runDQN; document.getElementById('clear').onclick=()=>{ start=null; goal=null; racks.clear(); path=[]; drawGrid(); };
+
+    drawGrid();
+  </script>
+</body>
+</html>
